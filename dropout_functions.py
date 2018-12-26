@@ -30,6 +30,22 @@ def targeted_weight_dropout(w, targ_rate, drop_rate, training):
     w = tf.reshape(w, w_shape)
     return w
 
+def weight_pruning(w, prune_rate):
+    w_shape = w.shape
+    w = tf.reshape(w, [-1, w_shape[-1]])
+    norm = tf.abs(w)
+    idx = tf.to_int32(prune_rate * tf.to_float(tf.shape(w)[0]))
+    print(w.shape, norm.shape, idx, tf.contrib.framework.sort(norm, axis=0))
+    threshold = tf.contrib.framework.sort(norm, axis=0)[idx]
+    mask = norm < threshold[None, :]
+
+    # mask = tf.where(
+    #   tf.logical_and((1. - drop_rate) < tf.random_uniform(tf.shape(w)), mask),
+    #   tf.ones_like(w, dtype=tf.float32), tf.zeros_like(w, dtype=tf.float32))
+    w = mask * w
+    w = tf.reshape(w, w_shape)
+    return w
+
 def targeted_unit_dropout(x, targ_rate, drop_rate, training):
     drop_rate = drop_rate
     targ_rate = targ_rate
@@ -55,7 +71,7 @@ class TargetedDense(tf.keras.layers.Dense):
                 targeted_dropout_type,   
                 activation=None,
                 use_bias=True,
-                kernel_initializer='glorot_uniform',
+                kernel_initializer=tf.keras.initializers.glorot_normal(seed=42),
                 bias_initializer='zeros',
                 kernel_regularizer=None,
                 bias_regularizer=None,
@@ -65,16 +81,16 @@ class TargetedDense(tf.keras.layers.Dense):
                 targeted_dropout_rate=0.25,
                 dropout_rate=0.25,
                 **kwargs):
-        super(TargetedDense, self).__init__(units,
-                activation=None,
-                use_bias=True,
-                kernel_initializer='glorot_uniform',
-                bias_initializer='zeros',
-                kernel_regularizer=None,
-                bias_regularizer=None,
-                activity_regularizer=None,
-                kernel_constraint=None,
-                bias_constraint=None,
+        super(TargetedDense, self).__init__(units=units,
+                activation=activation,
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                activity_regularizer=activity_regularizer,
+                kernel_constraint=kernel_constraint,
+                bias_constraint=bias_constraint,
                 **kwargs)
         self.targeted_dropout_rate = targeted_dropout_rate
         self.dropout_rate = dropout_rate
@@ -82,6 +98,16 @@ class TargetedDense(tf.keras.layers.Dense):
     def call(self, inputs):
         inputs = ops.convert_to_tensor(inputs, dtype=self.dtype)
         rank = common_shapes.rank(inputs)
+        # Newly added lines for targeted dropout 
+        # print(self.kernel[:5])
+        if(self.targeted_dropout_type=="weight"):
+            self.kernel.assign(targeted_weight_dropout(self.kernel, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase()))
+        elif(self.targeted_dropout_type=="unit"):
+            self.kernel.assign(targeted_unit_dropout(self.kernel, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase()))
+        else:
+            raise ValueError("Should be of 'weight' or 'unit'")
+
+        # print(self.kernel[:5])
         if rank > 2:
             # Broadcasting is required for the inputs.
             outputs = standard_ops.tensordot(inputs, self.kernel, [[rank - 1], [0]])
@@ -93,20 +119,11 @@ class TargetedDense(tf.keras.layers.Dense):
         else:
             outputs = gen_math_ops.mat_mul(inputs, self.kernel)
 
-        # Newly added lines for targeted dropout 
-        if(self.targeted_dropout_type=="weight"):
-            outputs = targeted_weight_dropout(outputs, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase())
-        elif(self.targeted_dropout_type=="unit"):
-            outputs = targeted_unit_dropout(outputs, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase())
-        else:
-            raise ValueError("Should be of 'weight' or 'unit'")
-
         if self.use_bias:
             outputs = nn.bias_add(outputs, self.bias)
         if self.activation is not None:
             return self.activation(outputs)  # pylint: disable=not-callable
         return outputs
-
 
 
 def get_targeted_dropout_model(targeted_dropout_type, conf):
@@ -117,7 +134,7 @@ def get_targeted_dropout_model(targeted_dropout_type, conf):
     TargetedDense(1000, targeted_dropout_type, activation=tf.nn.relu, use_bias=False, targeted_dropout_rate=target_rate, dropout_rate=drop_rate),
     TargetedDense(500, targeted_dropout_type, activation=tf.nn.relu, use_bias=False, targeted_dropout_rate=target_rate, dropout_rate=drop_rate),
     TargetedDense(200, targeted_dropout_type, activation=tf.nn.relu, use_bias=False, targeted_dropout_rate=target_rate, dropout_rate=drop_rate),
-    tf.keras.layers.Dense(10, activation=tf.nn.softmax, use_bias=False)
+    tf.keras.layers.Dense(10, activation=tf.nn.softmax, use_bias=False, kernel_initializer=tf.keras.initializers.glorot_normal(seed=42))
     ])
 
 def prune_units(model, pruning_perc=10):
