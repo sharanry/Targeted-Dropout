@@ -95,29 +95,36 @@ class TargetedDense(tf.keras.layers.Dense):
         self.targeted_dropout_rate = targeted_dropout_rate
         self.dropout_rate = dropout_rate
         self.targeted_dropout_type = targeted_dropout_type
-    def call(self, inputs):
+    def call(self, inputs, training=None):
         inputs = ops.convert_to_tensor(inputs, dtype=self.dtype)
         rank = common_shapes.rank(inputs)
         # Newly added lines for targeted dropout 
-        # print(self.kernel[:5])
-        if(self.targeted_dropout_type=="weight"):
-            self.kernel.assign(targeted_weight_dropout(self.kernel, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase()))
-        elif(self.targeted_dropout_type=="unit"):
-            self.kernel.assign(targeted_unit_dropout(self.kernel, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase()))
-        else:
-            raise ValueError("Should be of 'weight' or 'unit'")
+        if training is None:
+            training = K.learning_phase()
+        if(training):
+            if(self.targeted_dropout_type=="weight"):
+                dropped_kernel = targeted_weight_dropout(self.kernel, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase())
+            elif(self.targeted_dropout_type=="unit"):
+                dropped_kernel = targeted_unit_dropout(self.kernel, self.targeted_dropout_rate, self.dropout_rate, K.learning_phase())
+            else:
+                raise ValueError("Should be of 'weight' or 'unit'")
 
-        # print(self.kernel[:5])
         if rank > 2:
             # Broadcasting is required for the inputs.
-            outputs = standard_ops.tensordot(inputs, self.kernel, [[rank - 1], [0]])
+            if(training):
+                outputs = standard_ops.tensordot(inputs, dropped_kernel, [[rank - 1], [0]])
+            else:
+                outputs = standard_ops.tensordot(inputs, self.kernel, [[rank - 1], [0]])
             # Reshape the output back to the original ndim of the input.
             if not context.executing_eagerly():
                 shape = inputs.get_shape().as_list()
                 output_shape = shape[:-1] + [self.units]
                 outputs.set_shape(output_shape)
         else:
-            outputs = gen_math_ops.mat_mul(inputs, self.kernel)
+            if(training):
+                outputs = gen_math_ops.mat_mul(inputs, dropped_kernel)
+            else:
+                outputs = gen_math_ops.mat_mul(inputs, self.kernel)
 
         if self.use_bias:
             outputs = nn.bias_add(outputs, self.bias)
@@ -141,33 +148,48 @@ def prune_units(model, pruning_perc=10):
     pruned_model = tf.keras.models.Sequential()
     prev_mask = []
     pruned_model.add(tf.keras.layers.Flatten())
-    for weights in model.trainable_weights[:-1]:
-#         weights = layer.weights[0].numpy()
-        weights = weights.numpy()
-        c_norm = np.linalg.norm(weights, ord=2, axis=0)
-        tres = np.percentile(c_norm, pruning_perc)
-        mask = c_norm >= tres
+#     for weights in model.trainable_weights[:-1]:
+# #         weights = layer.weights[0].numpy()
+#         weights = weights.numpy()
+#         c_norm = np.linalg.norm(weights, ord=2, axis=0)
+#         tres = np.percentile(c_norm, pruning_perc)
+#         mask = c_norm >= tres
         
-        weights = weights[:, mask]
-#         print(prev_mask)
-        if type(prev_mask)==np.bool_ :
-            weights = weights[prev_mask,:]
-        elif len(prev_mask)!=0:
-            weights = weights[prev_mask,:]
-        prev_mask=mask
-#         if type(prev_mask)!=list:
-#             prev_mask = [prev_mask]
-        layer_new = tf.keras.layers.Dense(weights.shape[1], activation=tf.nn.relu, use_bias=False, weights=[weights])
-        pruned_model.add(layer_new)
+#         weights = weights[:, mask]
+# #         print(prev_mask)
+#         if type(prev_mask)==np.bool_ :
+#             weights = weights[prev_mask,:]
+#         elif len(prev_mask)!=0:
+#             weights = weights[prev_mask,:]
+#         prev_mask=mask
+# #         if type(prev_mask)!=list:
+# #             prev_mask = [prev_mask]
+#         layer_new = tf.keras.layers.Dense(weights.shape[1], activation=tf.nn.relu, use_bias=False, weights=[weights])
+#         pruned_model.add(layer_new)
 
-    weights = model.trainable_weights[-1]
-    weights = weights.numpy()
-    if type(prev_mask)==np.bool_ :
-        weights = weights[prev_mask,:]
-        layer_new = tf.keras.layers.Dense(weights.shape[1], activation=tf.nn.sigmoid, use_bias=False, weights=[weights])
-        pruned_model.add(layer_new)
-    elif len(prev_mask)!=0:
-        weights = weights[prev_mask,:]
-        layer_new = tf.keras.layers.Dense(weights.shape[1], activation=tf.nn.sigmoid, use_bias=False, weights=[weights])
-        pruned_model.add(layer_new)
-    return pruned_model
+#     weights = model.trainable_weights[-1]
+#     weights = weights.numpy()
+#     if type(prev_mask)==np.bool_ :
+#         weights = weights[prev_mask,:]
+#         layer_new = tf.keras.layers.Dense(weights.shape[1], activation=tf.nn.sigmoid, use_bias=False, weights=[weights])
+#         pruned_model.add(layer_new)
+#     elif len(prev_mask)!=0:
+#         weights = weights[prev_mask,:]
+#         layer_new = tf.keras.layers.Dense(weights.shape[1], activation=tf.nn.sigmoid, use_bias=False, weights=[weights])
+#         pruned_model.add(layer_new)
+#     return pruned_model
+    ####
+
+    for w in model.trainable_weights[:-1]:
+    
+        w = tf.reshape(x, [-1, x.shape[-1]])
+        norm = tf.norm(w, axis=0)
+        idx = int(targ_rate * int(w.shape[1]))
+        sorted_norms = tf.contrib.framework.sort(norm)
+        threshold = sorted_norms[idx]
+        mask = (norm >= threshold)[None, :]
+        mask = tf.tile(mask, [w.shape[0], 1])
+        
+
+        x = tf.reshape((1 - mask) * w, x.shape)
+        return x
